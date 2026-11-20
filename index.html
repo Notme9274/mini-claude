@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#faf9f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1b1a19" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Mini Claude">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icon-192.png">
+<title>Mini Claude</title>
+<style>
+:root{
+  --bg:#faf9f7; --fg:#1f1e1d; --muted:#76726b; --card:#ffffff; --line:#e7e3dc;
+  --accent:#2b7a78; --accent-fg:#ffffff; --user:#eeeae3; --code:#f3f0ea; --err:#b3412e;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#1b1a19; --fg:#ece9e4; --muted:#9b968d; --card:#262524; --line:#383634;
+    --accent:#5bbcb5; --accent-fg:#10201f; --user:#2f2d2b; --code:#141312; --err:#ee8a77;
+  }
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);
+  font:16px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+  -webkit-text-size-adjust:100%;}
+button,textarea,select,input{font:inherit;color:inherit}
+#app{height:100dvh;display:flex;flex-direction:column;max-width:880px;margin:0 auto;
+  padding-top:env(safe-area-inset-top)}
+
+/* header */
+.top{display:flex;align-items:center;gap:4px;padding:8px 8px;border-bottom:1px solid var(--line)}
+.top .ttl{flex:1;display:flex;flex-direction:column;align-items:center;line-height:1.2;min-width:0}
+.top .ttl b{font-size:17px}
+.top .ttl small{color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.icon{width:44px;height:44px;border:0;background:transparent;border-radius:12px;display:grid;place-items:center;cursor:pointer;flex:none}
+.icon:active{background:var(--user)}
+.icon svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+.hint{margin:8px 12px 0;padding:10px 12px;border-radius:12px;background:var(--user);font-size:14px;display:flex;gap:10px;align-items:flex-start}
+.hint button{border:0;background:transparent;color:var(--muted);font-size:18px;cursor:pointer;padding:0 4px}
+
+/* messages */
+#scroller{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:16px 14px 8px;overscroll-behavior:contain}
+.msg{margin:0 0 18px;display:flex;flex-direction:column}
+.msg.user{align-items:flex-end}
+.msg.user .body{background:var(--user);padding:10px 14px;border-radius:18px 18px 4px 18px;max-width:85%;white-space:pre-wrap;word-wrap:break-word}
+.msg.assistant .body{max-width:100%;word-wrap:break-word;overflow-wrap:anywhere}
+.msg .pic{display:block;max-width:min(260px,70%);max-height:260px;border-radius:14px;margin:0 0 6px;object-fit:cover}
+.msg .meta{font-size:12px;color:var(--muted);margin-top:4px}
+.body p{margin:0 0 .7em}.body p:last-child{margin-bottom:0}
+.body p.h{font-weight:650}
+.body ul,.body ol{margin:.2em 0 .8em;padding-left:1.4em}
+.body code{background:var(--code);padding:.1em .35em;border-radius:6px;font:0.9em ui-monospace,SFMono-Regular,Menlo,monospace}
+.body pre{background:var(--code);padding:12px;border-radius:12px;overflow-x:auto;margin:.4em 0 .8em}
+.body pre code{background:none;padding:0;font-size:13.5px;white-space:pre}
+.body details.think{margin:0 0 .8em;color:var(--muted);font-size:14px}
+.body details.think summary{cursor:pointer}
+.err{color:var(--err)}
+.dots i{display:inline-block;width:7px;height:7px;margin-right:4px;border-radius:50%;background:var(--muted);animation:b 1s infinite ease-in-out}
+.dots i:nth-child(2){animation-delay:.15s}.dots i:nth-child(3){animation-delay:.3s}
+@keyframes b{0%,80%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
+@media (prefers-reduced-motion: reduce){.dots i{animation:none;opacity:.6}}
+
+#empty{text-align:center;color:var(--muted);padding:12vh 12px 0}
+#empty h1{color:var(--fg);font-size:24px;margin:0 0 6px}
+#empty p{margin:0 0 18px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+.chips button{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:8px 14px;cursor:pointer;font-size:14px}
+.chips button:active{background:var(--user)}
+
+/* setup card */
+.card{margin:0 12px 8px;padding:16px;background:var(--card);border:1px solid var(--line);border-radius:16px;max-height:55dvh;overflow-y:auto}
+.card h2{margin:0 0 6px;font-size:18px}
+.card p{margin:0 0 12px;color:var(--muted);font-size:14.5px}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+select,textarea,input[type=number]{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:12px;background:var(--bg)}
+.btn{border:0;background:var(--accent);color:var(--accent-fg);border-radius:12px;padding:12px 16px;font-weight:600;cursor:pointer}
+.btn.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+.btn:disabled{opacity:.5;cursor:default}
+.bar{height:8px;border-radius:999px;background:var(--user);overflow:hidden;margin:6px 0}
+.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+.small{font-size:12.5px;color:var(--muted)}
+.warn{color:var(--err)}
+
+/* attachment preview */
+#attachPrev{display:flex;align-items:center;gap:10px;margin:0 12px;padding:8px;border:1px solid var(--line);border-radius:14px;background:var(--card)}
+#attachPrev img{width:56px;height:56px;object-fit:cover;border-radius:10px}
+#attachPrev span{flex:1;font-size:14px;color:var(--muted)}
+#attachPrev button{border:0;background:transparent;font-size:20px;color:var(--muted);cursor:pointer;width:40px;height:40px}
+
+/* composer */
+#composer{display:flex;gap:8px;align-items:flex-end;padding:8px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--line);background:var(--bg)}
+#input{flex:1;resize:none;max-height:160px;border-radius:20px;padding:11px 16px;line-height:1.4}
+#btnSend{width:44px;height:44px;border-radius:50%;border:0;background:var(--accent);color:var(--accent-fg);display:grid;place-items:center;cursor:pointer;flex:none}
+#btnSend:disabled{opacity:.4}
+#btnSend svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+#btnAttach{width:44px;height:44px;border-radius:50%;border:1px solid var(--line);background:transparent;display:grid;place-items:center;cursor:pointer;flex:none}
+#btnAttach svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+#btnAttach:disabled{opacity:.4}
+
+/* dialogs */
+dialog{border:1px solid var(--line);border-radius:18px;background:var(--card);color:var(--fg);padding:0;width:min(560px,92vw);max-height:88dvh}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+dialog .in{padding:18px;overflow-y:auto;max-height:88dvh}
+dialog h2{margin:0 0 14px;font-size:19px}
+dialog label{display:block;font-weight:600;font-size:14px;margin:14px 0 6px}
+dialog input[type=range]{width:100%}
+.cached{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+.cached button.del{border:1px solid var(--line);background:transparent;border-radius:10px;padding:6px 10px;cursor:pointer;color:var(--err);flex:none}
+.cached .open{flex:1;min-width:0;text-align:left;border:0;background:transparent;padding:6px 0;cursor:pointer;display:flex;flex-direction:column}
+.cached .open b{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cached .open small{color:var(--muted)}
+.cached.cur .open b::after{content:" · huidig";color:var(--accent);font-weight:500}
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <button class="icon" id="btnChats" aria-label="Gesprekken" title="Gesprekken">
+      <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+    </button>
+    <button class="icon" id="btnNew" aria-label="Nieuw gesprek" title="Nieuw gesprek">
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <div class="ttl"><b>Mini Claude</b><small id="status">starten…</small></div>
+    <button class="icon" id="btnSettings" aria-label="Instellingen" title="Instellingen">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </header>
+
+  <div id="installHint" class="hint" hidden>
+    <div><b>Tip:</b> tik op <b>Deel</b> (vierkantje met pijl) en kies <b>Zet op beginscherm</b>. Alleen zo houdt iPadOS het gedownloade model bewaard en werkt de app betrouwbaar offline.</div>
+    <button id="btnHintClose" aria-label="Sluiten">✕</button>
+  </div>
+
+  <main id="scroller">
+    <div id="messages"></div>
+    <div id="empty">
+      <h1>Hoi 👋</h1>
+      <p>Een kleine AI die volledig op dit apparaat draait.<br>Je gesprekken verlaten je iPad nooit.</p>
+      <div class="chips" id="chips">
+        <button>Leg uit wat een zwart gat is</button>
+        <button>Schrijf een vriendelijke mail om een afspraak te verzetten</button>
+        <button>Geef 5 ideeën voor een weekendje weg</button>
+      </div>
+    </div>
+  </main>
+
+  <section id="setup" class="card" hidden>
+    <h2 id="setupTitle">Kies een model</h2>
+    <p id="setupMsg"></p>
+    <div id="modelForm" hidden>
+      <select id="modelSelect" aria-label="Model"></select>
+      <p class="small" id="modelHint" style="margin:8px 0 12px"></p>
+      <div class="row">
+        <button class="btn" id="btnLoad">Starten</button>
+        <button class="btn ghost" id="btnCancelSetup" hidden>Annuleren</button>
+      </div>
+    </div>
+    <div id="progressWrap" hidden>
+      <div class="bar"><i id="barFill"></i></div>
+      <div class="small" id="progressText"></div>
+    </div>
+    <div class="row" id="retryRow" hidden><button class="btn" id="btnRetry">Opnieuw proberen</button></div>
+  </section>
+
+  <div id="attachPrev" hidden>
+    <img id="attachImg" alt="Bijgevoegde afbeelding">
+    <span>Afbeelding bijgevoegd</span>
+    <button id="btnAttachRemove" type="button" aria-label="Afbeelding verwijderen">✕</button>
+  </div>
+
+  <form id="composer" autocomplete="off">
+    <button id="btnAttach" type="button" aria-label="Afbeelding toevoegen" title="Afbeelding toevoegen" disabled>
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg>
+    </button>
+    <input type="file" id="file" accept="image/*" hidden>
+    <textarea id="input" rows="1" placeholder="Stel een vraag…" enterkeyhint="send" disabled></textarea>
+    <button id="btnSend" type="submit" aria-label="Verstuur" disabled>
+      <svg viewBox="0 0 24 24" id="iconSend"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    </button>
+  </form>
+</div>
+
+<dialog id="chatsDlg">
+  <div class="in">
+    <h2>Gesprekken</h2>
+    <div id="chatList" class="small">laden…</div>
+    <div class="row" style="margin-top:14px">
+      <button class="btn ghost" id="btnNewFromList" type="button">Nieuw gesprek</button>
+      <button class="btn" id="btnCloseChats" type="button">Klaar</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="settings">
+  <div class="in">
+    <h2>Instellingen</h2>
+
+    <label for="setMemory">Wat Mini Claude over jou moet onthouden</label>
+    <textarea id="setMemory" rows="4" placeholder="Bijvoorbeeld: Ik heet Sam en woon in Utrecht. Antwoord het liefst kort."></textarea>
+    <p class="small">Dit wordt bij elk gesprek meegestuurd. Typ in de chat <b>Onthoud dat …</b> om er snel iets aan toe te voegen.</p>
+
+    <label for="setSystem">Systeemprompt (hoe de AI zich gedraagt)</label>
+    <textarea id="setSystem" rows="5"></textarea>
+
+    <label for="setTemp">Creativiteit: <span id="tempVal"></span></label>
+    <input type="range" id="setTemp" min="0" max="1.5" step="0.05">
+
+    <label for="setMax">Maximale lengte van een antwoord</label>
+    <select id="setMax">
+      <option value="256">Kort (256 tokens)</option>
+      <option value="512">Gemiddeld (512)</option>
+      <option value="768">Lang (768)</option>
+      <option value="1024">Heel lang (1024)</option>
+      <option value="2048">Maximaal (2048)</option>
+    </select>
+
+    <label>Gedownloade modellen</label>
+    <div id="cachedList" class="small">laden…</div>
+    <p class="small" id="storageInfo"></p>
+
+    <div class="row" style="margin-top:12px">
+      <button class="btn ghost" id="btnSwitch" type="button">Ander model kiezen</button>
+      <button class="btn ghost" id="btnReset" type="button">Systeemprompt herstellen</button>
+      <button class="btn ghost" id="btnWipe" type="button">Alle gesprekken wissen</button>
+      <button class="btn" id="btnCloseSettings" type="button">Klaar</button>
+    </div>
+  </div>
+</dialog>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
