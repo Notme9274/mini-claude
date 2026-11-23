@@ -54,6 +54,20 @@ Kies in de modellijst **Phi-3.5-vision** (het enige beeldmodel in de lijst) en t
 - Het model is zwaar (ongeveer 4 tot 6 GB geheugen). Het is bedoeld voor iPads met 8 GB RAM of meer en kan op een kleinere iPad crashen.
 - Tekst in foto's lezen en beschrijven gaat redelijk; verwacht geen perfecte uitkomst.
 
+## Opdrachten en theorie (foto's en bestanden)
+Tik op het plaatje-icoon naast het invoerveld. Je hebt drie keuzes:
+- **Foto van een opdracht of theorie:** de app leest de tekst uit de foto en geeft die aan de AI. Dit werkt met elk model en op elke iPad, ook zonder beeldmodel. Via **Bekijk** kun je leesfouten verbeteren voordat je verstuurt. De eerste keer is internet nodig om de leesfunctie te downloaden (enkele tientallen MB); daarna werkt het offline.
+- **Foto laten bekijken door de AI:** alleen met het beeldmodel Phi-3.5-vision, handig voor tekeningen of grafieken.
+- **Tekstbestand:** een .txt, .md of .csv, bijvoorbeeld je samenvatting. Lange bestanden worden ingekort tot wat het model aankan.
+
+Zet bovenaan het invoerveld **Studiehulp** aan voor uitleg stap voor stap, met controle van rekenwerk en een controlevraag. De AI antwoordt dan ook rustiger (minder creatief, dus minder fouten).
+
+Tips voor betere antwoorden:
+- Een groter model (Llama-3.2-3B of Qwen2.5-3B) begrijpt theorie merkbaar beter dan het 1B-model.
+- Maak foto's recht van boven, scherp en met veel licht. Handgeschreven tekst wordt slecht gelezen.
+- Bij lange teksten: zet onder Instellingen **Lange teksten** aan en start het model opnieuw. Dit kost meer geheugen.
+- Controleer rekenwerk en feiten altijd zelf. Kleine modellen maken fouten, ook in wiskunde.
+
 ## Goed om te weten
 - Kleine modellen maken vaker fouten en verzinnen sneller dingen dan grote. Controleer belangrijke antwoorden.
 - Nederlands werkt het best met Llama-3.2, Qwen2.5 en Gemma. De kleinste modellen zijn in het Nederlands zwakker.

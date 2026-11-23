@@ -12,6 +12,15 @@ const DEFAULT_SYSTEM =
   'Wees beknopt, duidelijk en eerlijk. Zeg het als je iets niet zeker weet in plaats van iets te verzinnen.';
 
 const VISION_CTX = 6144; // beeldmodellen hebben extra ruimte nodig voor de afbeelding
+const BIG_CTX = 8192;    // optioneel: grotere context voor lange teksten
+
+const STUDY_PROMPT =
+  'Je helpt een leerling of student met leerstof en opdrachten. ' +
+  'Leg eerst kort de theorie of het idee uit in eenvoudig Nederlands, werk daarna de opdracht stap voor stap uit met tussenstappen, ' +
+  'en controleer rekenwerk nog een keer. Geef niet alleen het eindantwoord, maar laat zien hoe je erop komt. ' +
+  'Sluit af met een korte controlevraag om te testen of het begrepen is. ' +
+  'Als de opdracht onduidelijk is of de tekst leesfouten lijkt te hebben (bijvoorbeeld uit een foto), zeg dat dan en vraag om verduidelijking in plaats van te gokken. ' +
+  'Verzin geen formules, bronnen of feiten; zeg het eerlijk als je iets niet zeker weet.';
 
 /* ---------- helpers ---------- */
 const $ = (s) => document.querySelector(s);
@@ -81,9 +90,11 @@ const state = {
   dbOK: true,
   chats: [],
   chat: newChatObj(),
-  pending: null, // { full, thumb } afbeelding die bij het volgende bericht hoort
+  pending: null, // { full?, thumb?, doc?: {name, text, ocr?} } bijlage voor het volgende bericht
+  busy: false,
+  ctx: 4096,
   settings: Object.assign(
-    { system: DEFAULT_SYSTEM, temperature: 0.7, maxTokens: 768, memory: '' },
+    { system: DEFAULT_SYSTEM, temperature: 0.7, maxTokens: 768, memory: '', study: false, bigCtx: false, ocrLang: 'nld+eng' },
     store.get('settings', {})
   ),
 };
@@ -169,7 +180,7 @@ function nearBottom() {
 }
 function toBottom() { const s = scroller(); s.scrollTop = s.scrollHeight; }
 
-function addBubble(role, text, img) {
+function addBubble(role, text, img, doc) {
   const el = document.createElement('div');
   el.className = 'msg ' + role;
   if (img) {
@@ -178,6 +189,12 @@ function addBubble(role, text, img) {
     pic.alt = 'Meegestuurde afbeelding';
     pic.src = img;
     el.appendChild(pic);
+  }
+  if (doc) {
+    const chip = document.createElement('div');
+    chip.className = 'chip';
+    chip.textContent = (doc.ocr ? 'Tekst uit foto' : 'Bestand: ' + doc.name) + ' · ' + doc.text.length + ' tekens';
+    el.appendChild(chip);
   }
   const body = document.createElement('div');
   body.className = 'body';
@@ -192,7 +209,7 @@ function addBubble(role, text, img) {
 }
 function renderAll() {
   $('#messages').innerHTML = '';
-  for (const m of state.chat.messages) addBubble(m.role, m.content, m.img);
+  for (const m of state.chat.messages) addBubble(m.role, m.content, m.img, m.doc);
   $('#empty').hidden = state.chat.messages.length > 0;
   toBottom();
 }
@@ -303,11 +320,13 @@ function renderChatList() {
 
 /* ---------- geheugen ---------- */
 function systemText() {
+  let t = state.settings.system;
+  if (state.settings.study) t += '\n\n' + STUDY_PROMPT;
   const mem = (state.settings.memory || '').trim();
-  return mem
-    ? state.settings.system + '\n\nNotities van de gebruiker over zichzelf ("ik" is de gebruiker):\n' + mem
-    : state.settings.system;
+  if (mem) t += '\n\nNotities van de gebruiker over zichzelf ("ik" is de gebruiker):\n' + mem;
+  return t;
 }
+const effTemp = () => (state.settings.study ? Math.min(state.settings.temperature, 0.4) : state.settings.temperature);
 function addMemory(fact) {
   const cur = (state.settings.memory || '').trim();
   state.settings.memory = (cur ? cur + '\n' : '') + '- ' + fact;
@@ -324,7 +343,7 @@ addEventListener('online', renderStatus);
 addEventListener('offline', renderStatus);
 
 /* ---------- setup-kaart ---------- */
-function showSetup({ title, msg, form = false, progress = false, retry = false, cancel = false } = {}) {
+function showSetup({ title, msg, form = false, progress = false, retry = false, cancel = false, dismiss = false } = {}) {
   $('#setup').hidden = false;
   if (title) $('#setupTitle').textContent = title;
   $('#setupMsg').innerHTML = msg || '';
@@ -332,6 +351,7 @@ function showSetup({ title, msg, form = false, progress = false, retry = false, 
   $('#progressWrap').hidden = !progress;
   $('#retryRow').hidden = !retry;
   $('#btnCancelSetup').hidden = !cancel;
+  $('#dismissRow').hidden = !dismiss;
 }
 const hideSetup = () => { $('#setup').hidden = true; };
 
@@ -464,12 +484,16 @@ async function loadModel(id) {
   try {
     if (!state.engine) state.engine = new state.webllm.MLCEngine({ initProgressCallback: onProgress });
     else state.engine.setInitProgressCallback(onProgress);
-    await state.engine.reload(id, isVision(id) ? { context_window_size: VISION_CTX } : undefined);
+    const chatOpts = isVision(id)
+      ? { context_window_size: VISION_CTX }
+      : state.settings.bigCtx && !id.endsWith('-1k') ? { context_window_size: BIG_CTX } : undefined;
+    await state.engine.reload(id, chatOpts);
+    state.ctx = chatOpts?.context_window_size || rec?.overrides?.context_window_size || 4096;
     state.modelId = id;
     store.set('lastModel', id);
     store.set('loadingModel', null);
     try { navigator.storage?.persist?.(); } catch { /* negeren */ }
-    if (!isVision(id)) clearPending();
+    if (!isVision(id) && state.pending?.full) clearPending();
     hideSetup();
     setComposerEnabled(true);
     $('#input').focus();
@@ -496,8 +520,13 @@ async function loadModel(id) {
   }
 }
 
-/* ---------- afbeeldingen ---------- */
-function shrink(img, max, quality) {
+/* ---------- bijlagen: foto (tekst lezen of beeldmodel) en tekstbestand ---------- */
+const TESS_VER = '5.1.1';
+const TESS_JS = `https://cdn.jsdelivr.net/npm/tesseract.js@${TESS_VER}/dist/tesseract.min.js`;
+const TESS_WORKER = `https://cdn.jsdelivr.net/npm/tesseract.js@${TESS_VER}/dist/worker.min.js`;
+const TESS_CORE = 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1/tesseract-core-simd-lstm.wasm.js';
+
+function canvasOf(img, max) {
   const w = img.naturalWidth;
   const h = img.naturalHeight;
   const k = Math.min(1, max / Math.max(w, h));
@@ -508,25 +537,107 @@ function shrink(img, max, quality) {
   g.fillStyle = '#fff'; // doorzichtige PNG's niet zwart laten worden
   g.fillRect(0, 0, c.width, c.height);
   g.drawImage(img, 0, 0, c.width, c.height);
-  return c.toDataURL('image/jpeg', quality);
+  return c;
 }
+const shrink = (img, max, quality) => canvasOf(img, max).toDataURL('image/jpeg', quality);
 
-async function prepareImage(file) {
+async function decodeFile(file) {
   const url = URL.createObjectURL(file);
   try {
     const img = new Image();
     img.src = url;
     await img.decode();
-    return { full: shrink(img, 768, 0.85), thumb: shrink(img, 320, 0.7) };
-  } finally {
+    return img;
+  } catch (e) {
     URL.revokeObjectURL(url);
+    throw e;
+  } finally {
+    // de URL blijft kort geldig zodat de afbeelding getekend kan worden
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
 }
 
+async function prepareImage(file) {
+  const img = await decodeFile(file);
+  return { full: shrink(img, 768, 0.85), thumb: shrink(img, 320, 0.7) };
+}
+
+// Scripts van de CDN gaan via fetch() zodat de service worker ze voor offline gebruik bewaart.
+async function blobUrl(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('Downloaden mislukt (' + r.status + ')');
+  return URL.createObjectURL(new Blob([await r.arrayBuffer()], { type: 'text/javascript' }));
+}
+
+let tessP = null;
+function loadTesseract() {
+  if (!tessP) {
+    tessP = (async () => {
+      if (!window.Tesseract) {
+        const src = await blobUrl(TESS_JS);
+        await new Promise((res, rej) => {
+          const s = document.createElement('script');
+          s.src = src;
+          s.onload = res;
+          s.onerror = () => rej(new Error('Leesbibliotheek niet geladen'));
+          document.head.appendChild(s);
+        });
+      }
+      const [workerPath, corePath] = await Promise.all([blobUrl(TESS_WORKER), blobUrl(TESS_CORE)]);
+      return { workerPath, corePath };
+    })().catch((e) => { tessP = null; throw e; });
+  }
+  return tessP;
+}
+
+const OCR_STATUS = {
+  'loading tesseract core': 'Voorbereiden',
+  'initializing tesseract': 'Voorbereiden',
+  'loading language traineddata': 'Taaldata laden',
+  'initializing api': 'Voorbereiden',
+  'recognizing text': 'Tekst lezen',
+};
+
+async function runOcr(file, onProgress) {
+  const { workerPath, corePath } = await loadTesseract();
+  const img = await decodeFile(file);
+  const canvas = canvasOf(img, 2200);
+  const thumb = shrink(img, 320, 0.7);
+  const langs = (state.settings.ocrLang || 'nld+eng').split('+');
+  const worker = await window.Tesseract.createWorker(langs, 1, {
+    workerPath,
+    corePath,
+    workerBlobURL: false,
+    logger: (m) => { if (typeof m.progress === 'number') onProgress(OCR_STATUS[m.status] || 'Bezig', m.progress); },
+  });
+  let text = '';
+  try {
+    const { data } = await worker.recognize(canvas);
+    text = data.text || '';
+  } finally {
+    try { await worker.terminate(); } catch { /* negeren */ }
+  }
+  text = text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return { text, thumb };
+}
+
+function showBusy(text) {
+  $('#attachPrev').hidden = false;
+  $('#attachImg').hidden = true;
+  $('#attachLabel').textContent = text;
+  $('#btnAttachEdit').hidden = true;
+}
 function renderPending() {
   const p = state.pending;
   $('#attachPrev').hidden = !p;
-  if (p) $('#attachImg').src = p.thumb;
+  if (!p) return;
+  const img = $('#attachImg');
+  img.hidden = !p.thumb;
+  if (p.thumb) img.src = p.thumb;
+  $('#attachLabel').textContent = p.doc
+    ? (p.doc.ocr ? 'Tekst uit foto' : p.doc.name) + ' · ' + p.doc.text.length + ' tekens'
+    : 'Afbeelding bijgevoegd';
+  $('#btnAttachEdit').hidden = !p.doc;
 }
 function clearPending() {
   state.pending = null;
@@ -534,15 +645,23 @@ function clearPending() {
 }
 
 function onAttachClick() {
-  if (!state.modelId || state.generating) return;
+  if (!state.modelId || state.generating || state.busy) return;
+  $('#visionNote').textContent = isVision(state.modelId)
+    ? 'Geschikt voor tekeningen en foto\'s zonder veel tekst. Voor opdrachten met tekst is de eerste optie meestal beter.'
+    : 'Vraagt het model Phi-3.5-vision (zwaar: 8 GB RAM of meer). Kies dat via Instellingen → Ander model kiezen.';
+  openDialog('#attachDlg');
+}
+
+function onVisionOption() {
+  closeDialog('#attachDlg');
   if (!isVision(state.modelId)) {
     const vis = state.models.find((m) => isVision(m.model_id));
     showSetup({
       title: 'Afbeeldingen lezen',
       msg: vis
-        ? 'Het huidige model kan geen afbeeldingen lezen. Kies <b>Phi-3.5-vision</b>. Dat is een zwaar model (ongeveer 4 GB geheugen), dus vooral geschikt voor iPads met 8 GB RAM of meer.'
-        : 'Dit apparaat toont geen beeldmodel. Het heeft waarschijnlijk te weinig geheugen of mist ondersteuning (shader-f16).',
-      form: !!vis, cancel: true,
+        ? 'Het huidige model kan geen afbeeldingen bekijken. Kies <b>Phi-3.5-vision</b>. Dat is een zwaar model (ongeveer 4 GB geheugen), dus vooral geschikt voor iPads met 8 GB RAM of meer. Of kies in het menu <b>Foto van een opdracht of theorie</b>: dat werkt met elk model.'
+        : 'Dit apparaat toont geen beeldmodel. Het heeft waarschijnlijk te weinig geheugen of mist ondersteuning (shader-f16). Kies in het menu <b>Foto van een opdracht of theorie</b>: dat werkt met elk model.',
+      form: !!vis, cancel: !!vis, dismiss: !vis,
     });
     if (vis) { $('#modelSelect').value = vis.model_id; updateModelHint(); }
     return;
@@ -566,32 +685,118 @@ async function onFileChosen(e) {
   }
 }
 
+async function onOcrFile(e) {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  state.busy = true;
+  $('#btnAttach').disabled = true;
+  try {
+    showBusy('Voorbereiden…');
+    const r = await runOcr(file, (st, p) => showBusy(`${st} ${Math.round(p * 100)}%`));
+    if (r.text.length < 8) {
+      clearPending();
+      showSetup({ title: 'Geen tekst gevonden', msg: 'Probeer een scherpere foto met meer licht, recht van boven genomen.', dismiss: true });
+      return;
+    }
+    state.pending = { thumb: r.thumb, doc: { name: 'Foto', text: r.text.slice(0, 60000), ocr: true } };
+    renderPending();
+    flash('Tekst uit foto gelezen ✓');
+    $('#input').focus();
+  } catch (err) {
+    console.warn(err);
+    clearPending();
+    showSetup({
+      title: 'Foto lezen mislukt',
+      msg: (navigator.onLine
+        ? 'De tekst uit de foto kon niet worden gelezen. Probeer het nog eens, of typ de tekst over.'
+        : 'De leesfunctie is nog niet gedownload. Maak één keer verbinding met internet en probeer het opnieuw.') +
+        `<br><span class="small">${esc(String(err?.message || err)).slice(0, 200)}</span>`,
+      dismiss: true,
+    });
+  } finally {
+    state.busy = false;
+    $('#btnAttach').disabled = !state.modelId || state.generating;
+  }
+}
+
+async function onDocFile(e) {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  if (file.size > 2_000_000) { flash('Bestand is te groot (maximaal 2 MB)'); return; }
+  try {
+    const text = (await file.text()).replace(/\r\n/g, '\n').trim();
+    if (!text) { flash('Het bestand is leeg'); return; }
+    state.pending = { doc: { name: file.name.slice(0, 60), text: text.slice(0, 60000) } };
+    renderPending();
+    $('#input').focus();
+  } catch (err) {
+    console.warn(err);
+    flash('Bestand kon niet gelezen worden');
+  }
+}
+
+function openDocEditor() {
+  if (!state.pending?.doc) return;
+  $('#docText').value = state.pending.doc.text;
+  openDialog('#docDlg');
+}
+function saveDocEditor() {
+  const t = $('#docText').value.trim();
+  if (!t) clearPending();
+  else if (state.pending?.doc) { state.pending.doc.text = t.slice(0, 60000); renderPending(); }
+  closeDialog('#docDlg');
+}
+
+function renderStudy() {
+  const on = !!state.settings.study;
+  $('#btnStudy').setAttribute('aria-pressed', String(on));
+  $('#modeNote').textContent = on ? 'Legt stap voor stap uit' : '';
+}
+
 /* ---------- gesprek ---------- */
 function buildPrompt(fullImg) {
   const vision = isVision(state.modelId);
-  const rec = modelRec(state.modelId);
-  const ctx = vision ? VISION_CTX : rec?.overrides?.context_window_size || 4096;
+  const ctx = state.ctx || 4096;
   const maxTok = Math.max(128, Math.min(state.settings.maxTokens, Math.floor(ctx / 2)));
   const sys = systemText();
   const reserve = fullImg ? 2200 : 0; // een afbeelding kost veel tokens
   const budget = Math.max(600, (ctx - maxTok - 150 - reserve) * 3); // ruwe schatting: 3 tekens per token
+  const docMax = Math.floor(budget * 0.65);
+  const all = state.chat.messages;
+
+  // Alleen de meest recente bijlage gaat volledig mee; oudere worden genoemd.
+  let docIdx = -1;
+  for (let i = all.length - 1; i >= 0; i--) if (all[i].doc) { docIdx = i; break; }
+  let truncated = false;
+  const textOf = (m, i) => {
+    if (!m.doc) return m.content;
+    if (i !== docIdx) return m.content + ` (met bijlage "${m.doc.name}")`;
+    let t = m.doc.text;
+    if (t.length > docMax) { t = t.slice(0, docMax) + '\n[…ingekort]'; truncated = true; }
+    const head = m.doc.ocr
+      ? 'Tekst uit een foto (kan leesfouten bevatten):'
+      : `Bestand "${m.doc.name}":`;
+    return `${head}\n\"\"\"\n${t}\n\"\"\"\n\n${m.content}`;
+  };
 
   let used = sys.length;
   const picked = [];
-  const all = state.chat.messages;
   for (let i = all.length - 1; i >= 0; i--) {
     const m = all[i];
     if (!m.content) continue;
-    if (used + m.content.length > budget && picked.length > 0) break;
-    used += m.content.length;
-    picked.unshift(m);
+    const t = textOf(m, i);
+    if (used + t.length > budget && picked.length > 0) break;
+    used += t.length;
+    picked.unshift({ m, t });
   }
-  while (picked.length && picked[0].role !== 'user') picked.shift();
+  while (picked.length && picked[0].m.role !== 'user') picked.shift();
 
-  const msgs = picked.map((m, i) => {
-    let c = m.content;
+  const msgs = picked.map(({ m, t }, i) => {
+    let c = t;
     const isLast = i === picked.length - 1;
-    if (m.img && !(isLast && fullImg)) c += ' (met afbeelding)';
+    if (m.img && !m.doc && !(isLast && fullImg)) c += ' (met afbeelding)';
     return { role: m.role, content: c };
   });
 
@@ -608,7 +813,7 @@ function buildPrompt(fullImg) {
       { type: 'image_url', image_url: { url: fullImg } },
     ];
   }
-  return { messages: msgs, maxTok };
+  return { messages: msgs, maxTok, truncated };
 }
 
 function setGenerating(on) {
@@ -617,28 +822,34 @@ function setGenerating(on) {
   icon.innerHTML = on ? '<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/>' : '<path d="M12 19V5M5 12l7-7 7 7"/>';
   $('#btnSend').setAttribute('aria-label', on ? 'Stop' : 'Verstuur');
   $('#btnSend').disabled = !state.modelId;
-  $('#btnAttach').disabled = on || !state.modelId;
+  $('#btnAttach').disabled = on || state.busy || !state.modelId;
 }
 
 async function send(text) {
-  if (state.generating || !state.modelId) return;
+  if (state.generating || !state.modelId || state.busy) return;
   text = text.trim();
   const pend = state.pending;
   if (!text && !pend) return;
-  if (!text) text = 'Beschrijf deze afbeelding.';
+  if (!text) {
+    text = pend.doc
+      ? (state.settings.study ? 'Leg de theorie hierin uit en help me de opdracht stap voor stap te maken.' : 'Vat dit samen.')
+      : 'Beschrijf deze afbeelding.';
+  }
 
   const mm = text.match(/^\s*onthoud(?:\s+dat)?\s*[:,]?\s+(.{3,})/i);
   if (mm) { addMemory(mm[1].trim()); flash('Onthouden ✓'); }
 
   const userMsg = { role: 'user', content: text };
-  if (pend) userMsg.img = pend.thumb;
+  if (pend?.thumb) userMsg.img = pend.thumb;
+  if (pend?.doc) userMsg.doc = pend.doc;
   state.chat.messages.push(userMsg);
   clearPending();
-  addBubble('user', text, userMsg.img);
+  addBubble('user', text, userMsg.img, userMsg.doc);
   toBottom();
   saveChat();
 
-  const { messages, maxTok } = buildPrompt(pend?.full);
+  const { messages, maxTok, truncated } = buildPrompt(pend?.full);
+  if (truncated) flash('Bijlage ingekort: het model heeft beperkt geheugen');
   const b = addBubble('assistant', '');
   b.body.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
   toBottom();
@@ -660,7 +871,7 @@ async function send(text) {
     const stream = await state.engine.chat.completions.create({
       messages,
       stream: true,
-      temperature: state.settings.temperature,
+      temperature: effTemp(),
       top_p: 0.95,
       max_tokens: maxTok,
       stream_options: { include_usage: true },
@@ -765,6 +976,8 @@ function openSettings() {
   $('#setTemp').value = state.settings.temperature;
   $('#tempVal').textContent = Number(state.settings.temperature).toFixed(2).replace('.', ',');
   $('#setMax').value = String(state.settings.maxTokens);
+  $('#setOcr').value = state.settings.ocrLang;
+  $('#setBig').checked = !!state.settings.bigCtx;
   openDialog('#settings');
   if (state.webllm) renderCached();
 }
@@ -812,7 +1025,20 @@ function wireUI() {
 
   $('#btnAttach').addEventListener('click', onAttachClick);
   $('#file').addEventListener('change', onFileChosen);
+  $('#fileOcr').addEventListener('change', onOcrFile);
+  $('#fileDoc').addEventListener('change', onDocFile);
   $('#btnAttachRemove').addEventListener('click', clearPending);
+  $('#btnAttachEdit').addEventListener('click', openDocEditor);
+  $('#optOcr').addEventListener('click', () => { closeDialog('#attachDlg'); $('#fileOcr').click(); });
+  $('#optVision').addEventListener('click', onVisionOption);
+  $('#optDoc').addEventListener('click', () => { closeDialog('#attachDlg'); $('#fileDoc').click(); });
+  $('#btnCloseAttach').addEventListener('click', () => closeDialog('#attachDlg'));
+  $('#btnDocSave').addEventListener('click', saveDocEditor);
+  $('#btnDocCancel').addEventListener('click', () => closeDialog('#docDlg'));
+  $('#btnDismiss').addEventListener('click', hideSetup);
+  $('#btnStudy').addEventListener('click', () => { state.settings.study = !state.settings.study; saveSettings(); renderStudy(); });
+  $('#setOcr').addEventListener('change', (e) => { state.settings.ocrLang = e.target.value; saveSettings(); });
+  $('#setBig').addEventListener('change', (e) => { state.settings.bigCtx = e.target.checked; saveSettings(); });
 
   $('#btnNew').addEventListener('click', newChat);
   $('#btnChats').addEventListener('click', () => { renderChatList(); openDialog('#chatsDlg'); });
@@ -856,6 +1082,7 @@ function maybeShowInstallHint() {
 
 async function main() {
   wireUI();
+  renderStudy();
   await initChats();
   renderAll();
   renderStatus();
