@@ -1,7 +1,7 @@
 // Service worker voor Mini Claude: maakt de app en de AI-bibliotheek offline beschikbaar.
 // De modelbestanden zelf (huggingface.co) worden door WebLLM zelf in de browsercache bewaard; die laten we met rust.
 
-const VERSION = 'v4';
+const VERSION = 'v5';
 const SHELL_CACHE = `miniai-shell-${VERSION}`;
 const LIB_CACHE = `miniai-lib-${VERSION}`;
 const SHELL = [

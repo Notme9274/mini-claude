@@ -410,14 +410,22 @@ function buildModelList(all) {
   return list.sort((a, b) => (a.vram_required_MB || 0) - (b.vram_required_MB || 0));
 }
 
-async function refreshModelOptions() {
+let optChain = Promise.resolve();
+function refreshModelOptions() {
+  optChain = optChain.then(_refreshModelOptions, _refreshModelOptions);
+  return optChain;
+}
+
+async function _refreshModelOptions() {
   const sel = $('#modelSelect');
   const prev = sel.value || store.get('lastModel');
+  // Alle cachecontroles tegelijk in plaats van een voor een
+  await Promise.all(state.models.map(async (m) => {
+    try { m._cached = await state.webllm.hasModelInCache(m.model_id); } catch { m._cached = false; }
+  }));
   sel.innerHTML = '';
   for (const m of state.models) {
-    let cached = false;
-    try { cached = await state.webllm.hasModelInCache(m.model_id); } catch { /* negeren */ }
-    m._cached = cached;
+    const cached = m._cached;
     const o = document.createElement('option');
     o.value = m.model_id;
     const short = m.model_id.endsWith('-1k') ? ' · korte context' : '';
@@ -451,7 +459,9 @@ function updateModelHint() {
 function onProgress(r) {
   const pct = Math.max(0, Math.min(1, r.progress || 0));
   $('#barFill').style.width = (pct * 100).toFixed(0) + '%';
-  $('#progressText').textContent = (r.text || '').slice(0, 160) || `${(pct * 100).toFixed(0)}%`;
+  const el = state.loadStart ? Math.round((performance.now() - state.loadStart) / 1000) : 0;
+  const base = (r.text || '').slice(0, 150) || `${(pct * 100).toFixed(0)}%`;
+  $('#progressText').textContent = el ? `${base} · ${el} s` : base;
 }
 
 async function loadModel(id) {
@@ -476,9 +486,10 @@ async function loadModel(id) {
   });
   $('#barFill').style.width = '0%';
   $('#progressText').textContent = 'Starten…';
+  state.loadStart = performance.now();
 
   let wake = null;
-  try { wake = await navigator.wakeLock?.request('screen'); } catch { /* niet beschikbaar */ }
+  try { navigator.wakeLock?.request('screen').then((w) => { wake = w; }).catch(() => {}); } catch { /* niet beschikbaar */ }
   store.set('loadingModel', id); // markering: wordt gewist zodra laden klaar is
 
   try {
@@ -489,6 +500,7 @@ async function loadModel(id) {
       : state.settings.bigCtx && !id.endsWith('-1k') ? { context_window_size: BIG_CTX } : undefined;
     await state.engine.reload(id, chatOpts);
     state.ctx = chatOpts?.context_window_size || rec?.overrides?.context_window_size || 4096;
+    if (state.perf) state.perf.model = (performance.now() - state.loadStart) / 1000;
     state.modelId = id;
     store.set('lastModel', id);
     store.set('loadingModel', null);
@@ -970,6 +982,13 @@ async function renderCached() {
   } catch { /* negeren */ }
 }
 
+function renderPerf() {
+  const p = state.perf || {};
+  const f = (k, label) => (p[k] != null ? `${label} ${p[k].toFixed(1).replace('.', ',')} s` : null);
+  const parts = [f('lib', 'bibliotheek'), f('ready', 'klaar voor model'), f('model', 'model laden')].filter(Boolean);
+  $('#perfInfo').textContent = parts.length ? 'Laadtijd (laatste keer): ' + parts.join(' · ') + '.' : '';
+}
+
 function openSettings() {
   $('#setMemory').value = state.settings.memory || '';
   $('#setSystem').value = state.settings.system;
@@ -978,6 +997,7 @@ function openSettings() {
   $('#setMax').value = String(state.settings.maxTokens);
   $('#setOcr').value = state.settings.ocrLang;
   $('#setBig').checked = !!state.settings.bigCtx;
+  renderPerf();
   openDialog('#settings');
   if (state.webllm) renderCached();
 }
@@ -1081,21 +1101,34 @@ function maybeShowInstallHint() {
 }
 
 async function main() {
+  const T0 = performance.now();
+  const perf = (state.perf = {});
+  const lap = (k) => { perf[k] = (performance.now() - T0) / 1000; };
+
   wireUI();
   renderStudy();
-  await initChats();
-  renderAll();
-  renderStatus();
   setComposerEnabled(false);
   maybeShowInstallHint();
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch((e) => console.warn('Service worker mislukt:', e));
   }
-
   showSetup({ title: 'Even geduld…', msg: 'Apparaat controleren.' });
 
-  const gpu = await detectGPU();
+  // Alles wat niet van elkaar afhangt start tegelijk: opslag, GPU-controle en de AI-bibliotheek.
+  const controlled = !!navigator.serviceWorker?.controller;
+  const chatsP = initChats().then(() => { renderAll(); renderStatus(); });
+  const gpuP = detectGPU();
+  const libP = (async () => {
+    // Pas bij de allereerste keer wachten tot de service worker klaar is, zodat de bibliotheek in de cache komt.
+    if (!controlled) await swReady();
+    const m = await loadLib();
+    lap('lib');
+    return m;
+  })();
+  libP.catch(() => {}); // de fout wordt hieronder netjes getoond
+
+  const gpu = await gpuP;
   if (!gpu.ok) {
     showSetup({
       title: 'WebGPU niet beschikbaar',
@@ -1108,9 +1141,8 @@ async function main() {
   }
   state.f16 = gpu.f16;
 
-  await swReady();
   try {
-    state.webllm = await loadLib();
+    state.webllm = await libP;
   } catch (e) {
     console.error(e);
     showSetup({
@@ -1124,12 +1156,13 @@ async function main() {
   }
 
   state.models = buildModelList(state.webllm.prebuiltAppConfig.model_list);
-  await refreshModelOptions();
+  await chatsP;
 
   const crashed = store.get('loadingModel', null);
   const last = store.get('lastModel', null);
   if (crashed) {
     store.set('loadingModel', null);
+    await refreshModelOptions();
     showSetup({
       title: 'Laden niet afgerond',
       msg: `Het laden van <b>${esc(shortName(crashed))}</b> werd vorige keer niet afgerond. Dat kan komen doordat je de app sloot, of doordat er te weinig geheugen was. Probeer het opnieuw of kies een kleiner model.`,
@@ -1137,16 +1170,25 @@ async function main() {
     });
     return;
   }
+
+  // Snelle route: het laatst gebruikte model meteen starten, zonder eerst de hele lijst op te bouwen.
   const rec = last && modelRec(last);
-  if (rec?._cached) {
-    loadModel(last); // direct starten vanuit de opslag, ook offline
-  } else {
-    showSetup({
-      title: 'Kies een model',
-      msg: 'Begin met het kleinste model. Het wordt één keer gedownload (ongeveer 0,5 tot 2 GB) en werkt daarna zonder internet.',
-      form: true,
-    });
+  if (rec) {
+    try { rec._cached = await state.webllm.hasModelInCache(last); } catch { rec._cached = false; }
+    if (rec._cached) {
+      lap('ready');
+      loadModel(last);
+      refreshModelOptions(); // gebeurt op de achtergrond
+      return;
+    }
   }
+  await refreshModelOptions();
+  lap('ready');
+  showSetup({
+    title: 'Kies een model',
+    msg: 'Begin met het kleinste model. Het wordt één keer gedownload (ongeveer 0,5 tot 2 GB) en werkt daarna zonder internet.',
+    form: true,
+  });
 }
 
 main();

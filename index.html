@@ -10,6 +10,10 @@
 <meta name="apple-mobile-web-app-title" content="Mini Claude">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="manifest" href="manifest.webmanifest">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.84/+esm" crossorigin>
+<link rel="dns-prefetch" href="https://huggingface.co">
+<link rel="dns-prefetch" href="https://raw.githubusercontent.com">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" type="image/png" href="icon-192.png">
 <title>Mini Claude</title>
@@ -289,6 +293,7 @@ dialog input[type=range]{width:100%}
     <label>Gedownloade modellen</label>
     <div id="cachedList" class="small">laden…</div>
     <p class="small" id="storageInfo"></p>
+    <p class="small" id="perfInfo"></p>
 
     <div class="row" style="margin-top:12px">
       <button class="btn ghost" id="btnSwitch" type="button">Ander model kiezen</button>
