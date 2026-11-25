@@ -1,9 +1,10 @@
 // Service worker voor Mini Claude: maakt de app en de AI-bibliotheek offline beschikbaar.
 // De modelbestanden zelf (huggingface.co) worden door WebLLM zelf in de browsercache bewaard; die laten we met rust.
 
-const VERSION = 'v5';
+const VERSION = 'v6';
 const SHELL_CACHE = `miniai-shell-${VERSION}`;
-const LIB_CACHE = `miniai-lib-${VERSION}`;
+// Vaste naam: de bibliotheek heeft een vastgepinde versie in de URL en hoeft bij app-updates niet opnieuw gedownload te worden.
+const LIB_CACHE = 'miniai-lib';
 const SHELL = [
   './',
   'index.html',
@@ -13,12 +14,45 @@ const SHELL = [
   'icon-512.png',
   'apple-touch-icon.png',
 ];
+const LIB_URLS = ['https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.84/+esm'];
 const LIB_HOSTS = ['cdn.jsdelivr.net', 'fastly.jsdelivr.net', 'gcore.jsdelivr.net', 'esm.run', 'unpkg.com'];
 
+// Zoekt in een JS-module naar de modules die hij zelf importeert (zoals /npm/loglevel@1.9.2/+esm).
+function findImports(code, base) {
+  const out = new Set();
+  const re = /(?:from|import)\s*["'](\/npm\/[^"']+|https:\/\/cdn\.jsdelivr\.net\/npm\/[^"']+)["']/g;
+  let m;
+  while ((m = re.exec(code))) out.add(new URL(m[1], base).href);
+  return [...out];
+}
+
+// Bewaart de AI-bibliotheek meteen bij installatie, los van wat de pagina doet. Mislukt dit (offline), dan is dat niet erg.
+async function precacheLib(depth = 0, urls = LIB_URLS) {
+  const cache = await caches.open(LIB_CACHE);
+  await Promise.all(urls.map(async (u) => {
+    try {
+      let res = await cache.match(u);
+      if (!res) {
+        const net = await fetch(u, { mode: 'cors' });
+        if (!net.ok) return;
+        await cache.put(u, net.clone());
+        res = net;
+      }
+      if (depth < 2) {
+        const sub = findImports(await res.clone().text(), u).filter((x) => !urls.includes(x));
+        if (sub.length) await precacheLib(depth + 1, sub);
+      }
+    } catch { /* negeren */ }
+  }));
+}
+
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(SHELL_CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())
-  );
+  event.waitUntil((async () => {
+    const c = await caches.open(SHELL_CACHE);
+    await c.addAll(SHELL);
+    await precacheLib().catch(() => {});
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', (event) => {

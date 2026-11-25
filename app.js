@@ -376,20 +376,6 @@ async function detectGPU() {
   }
 }
 
-async function swReady() {
-  // Wacht tot de service worker de pagina bestuurt, zodat de bibliotheek meteen in de offline-cache komt.
-  if (!('serviceWorker' in navigator)) return;
-  try {
-    await Promise.race([navigator.serviceWorker.ready, sleep(4000)]);
-    if (!navigator.serviceWorker.controller) {
-      await Promise.race([
-        new Promise((r) => navigator.serviceWorker.addEventListener('controllerchange', r, { once: true })),
-        sleep(1500),
-      ]);
-    }
-  } catch { /* geen service worker: doorgaan */ }
-}
-
 async function loadLib() {
   let lastErr;
   for (const url of WEBLLM_URLS) {
@@ -1113,16 +1099,15 @@ async function main() {
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch((e) => console.warn('Service worker mislukt:', e));
   }
-  showSetup({ title: 'Even geduld…', msg: 'Apparaat controleren.' });
+  const step = (t) => showSetup({ title: 'Even geduld…', msg: t });
+  step('WebGPU controleren…');
 
   // Alles wat niet van elkaar afhangt start tegelijk: opslag, GPU-controle en de AI-bibliotheek.
   const controlled = !!navigator.serviceWorker?.controller;
   const chatsP = initChats().then(() => { renderAll(); renderStatus(); });
   const gpuP = detectGPU();
   const libP = (async () => {
-    // Pas bij de allereerste keer wachten tot de service worker klaar is, zodat de bibliotheek in de cache komt.
-    if (!controlled) await swReady();
-    const m = await loadLib();
+    const m = await loadLib(); // de service worker bewaart de bibliotheek zelf voor offline gebruik
     lap('lib');
     return m;
   })();
@@ -1141,9 +1126,16 @@ async function main() {
   }
   state.f16 = gpu.f16;
 
+  const libStart = performance.now();
+  const tick = setInterval(() => {
+    const sec = Math.round((performance.now() - libStart) / 1000);
+    step(`AI-bibliotheek laden… ${sec} s` + (controlled || sec < 4 ? '' : ' (de eerste keer duurt langer)'));
+  }, 1000);
+  step('AI-bibliotheek laden…');
   try {
     state.webllm = await libP;
   } catch (e) {
+    clearInterval(tick);
     console.error(e);
     showSetup({
       title: 'Bibliotheek niet geladen',
@@ -1155,6 +1147,8 @@ async function main() {
     return;
   }
 
+  clearInterval(tick);
+  step('Modellen zoeken…');
   state.models = buildModelList(state.webllm.prebuiltAppConfig.model_list);
   await chatsP;
 
